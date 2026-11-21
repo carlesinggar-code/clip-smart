@@ -1,0 +1,7 @@
+{
+  "name": "clipsmart",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "kv_namespaces": [{ "binding": "KV", "id": "a1d4c54f17db4fd0ad9537cc2899d1c0" }]
+}
