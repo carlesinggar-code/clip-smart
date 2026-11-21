@@ -1,4 +1,4 @@
-const CACHE = 'clip-smart-v3';
+const CACHE = 'clip-smart-v4';
 const SHELL = ['./', './index.html', './app.js', './manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -17,7 +17,7 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  if (/^\/(quota|analyze|redeem|admin|health)/.test(new URL(req.url).pathname)) return;
+  if (/^\/(quota|analyze|redeem|admin|health|pay|claim|midtrans-notify)/.test(new URL(req.url).pathname)) return;
   e.respondWith(
     fetch(req)
       .then((res) => {

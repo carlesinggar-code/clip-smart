@@ -72,7 +72,7 @@
 <!-- Premium -->
 <div id="pro" class="fixed inset-0 hidden items-center justify-center p-4 bg-black/70 z-50 overflow-y-auto">
   <div class="w-full max-w-sm rounded-3xl gpro p-[2px] my-6"><div class="rounded-[22px] bg-neutral-900 p-6">
-    <p class="text-pink-300 text-sm font-bold">Disarankan</p>
+    <div class="flex items-center justify-between"><p class="text-pink-300 text-sm font-bold">Disarankan</p><button id="help" class="w-7 h-7 rounded-full bg-neutral-800 text-sm font-bold text-neutral-300" aria-label="Bantuan">?</button></div>
     <h2 class="text-3xl font-extrabold mt-1">Clip Smart <span class="bg-gradient-to-r from-amber-300 to-pink-400 bg-clip-text text-transparent">Pro</span></h2>
     <p class="mt-5 text-neutral-500 line-through">Rp 20.000</p>
     <p class="text-4xl font-extrabold text-emerald-400">Rp 14.999<span class="text-base font-semibold text-emerald-300">/bln</span></p>
@@ -81,8 +81,23 @@
       <li class="flex gap-3"><i class="not-italic text-neutral-300">✓</i>2 highlight tiap video</li>
       <li class="flex gap-3"><i class="not-italic text-neutral-300">✓</i>Super HD 1080p</li>
     </ul>
+    <div id="helpbox" class="hidden mt-5 rounded-2xl bg-neutral-800 p-4 text-sm text-neutral-300 space-y-2">
+      <p><b>1.</b> Tekan <b>Dapatkan Pro</b>, lalu bayar.</p>
+      <p><b>2.</b> Setelah lunas, kode muncul otomatis dan Pro langsung aktif.</p>
+      <p><b>3.</b> Simpan kodenya. Ganti HP atau pasang ulang? Tempel kode di kolom Kode Pro, lalu Aktifkan.</p>
+      <p><b>4.</b> Satu kode untuk maksimal 2 perangkat.</p>
+      <p><b>5.</b> Aktif 30 hari sejak pertama dipakai.</p>
+      <p><b>6.</b> Sudah bayar tapi belum aktif? Tekan Cek pembayaran.</p>
+    </div>
+    <div id="got" class="hidden mt-5 rounded-2xl bg-neutral-800 p-4 text-center">
+      <p class="text-sm text-emerald-400 font-bold">Pembayaran berhasil, Pro aktif</p>
+      <p id="gotCode" class="mt-2 text-xl font-extrabold tracking-wider select-all"></p>
+      <button id="copy" class="mt-2 text-sm text-neutral-400 underline">Salin kode</button>
+      <p class="mt-1 text-xs text-neutral-500">Simpan kode ini untuk HP lain.</p>
+    </div>
     <button id="pay" class="gpro mt-7 w-full py-3.5 rounded-full text-neutral-900 font-extrabold">Dapatkan Pro</button>
     <div class="mt-4 flex gap-2"><input id="code" placeholder="Kode Pro" class="min-w-0 flex-1 rounded-full bg-neutral-800 px-4 py-3 text-sm uppercase outline-none"><button id="redeem" class="px-5 rounded-full bg-neutral-700 text-sm font-bold">Aktifkan</button></div>
+    <button id="chk" class="hidden mt-3 w-full text-sm text-neutral-400 underline">Cek pembayaran</button>
     <button id="x" class="mt-2 w-full py-3 text-sm text-neutral-400">Tutup</button>
   </div></div>
 </div>

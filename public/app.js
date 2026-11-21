@@ -1,5 +1,4 @@
-
-const PAY_LINK = 'https://wa.me/628338975109?text=Halo%2C%20mau%20beli%20Clip%20Smart%20Pro'; // ganti dengan nomor WhatsApp-mu
+// ===== Pengaturan =====
 const SHOWCASE = [
   ['Sunset', 'https://assets.mixkit.co/videos/1170/1170-360.mp4'],
   ['Air terjun', 'https://assets.mixkit.co/active_storage/video_items/100174/1721166924/100174-video-360.mp4'],
@@ -14,7 +13,7 @@ let ori = 'p', file = null, q = { pro: false, max: 2, used: 0 };
 
 const toast = (t) => { $('toast').textContent = t; $('toast').classList.remove('hidden'); setTimeout(() => $('toast').classList.add('hidden'), 3000); };
 const prog = (l, p) => { $('prog').classList.remove('hidden'); $('plabel').textContent = l; $('ppct').textContent = p + '%'; $('pbar').style.width = p + '%'; };
-const showPro = (v) => { $('pro').classList.toggle('hidden', !v); $('pro').classList.toggle('flex', v); };
+const showPro = (v) => { $('pro').classList.toggle('hidden', !v); $('pro').classList.toggle('flex', v); $('chk').classList.toggle('hidden', !localStorage.cs_order); };
 
 async function loadQuota() {
   try { q = await (await fetch('/quota', { headers: { 'x-id': id } })).json(); } catch {}
@@ -27,13 +26,57 @@ document.querySelectorAll('.ori').forEach((b) => (b.onclick = () => setOri(b.dat
 setOri('p');
 $('up').onclick = $('up2').onclick = () => showPro(true);
 $('x').onclick = () => showPro(false);
-$('pay').onclick = () => open(PAY_LINK);
-$('redeem').onclick = async () => {
+async function activate(code) {
   try {
-    const r = await fetch('/redeem', { method: 'POST', headers: { 'x-id': id }, body: JSON.stringify({ code: $('code').value }) });
-    if (r.ok) { toast('Pro aktif'); showPro(false); loadQuota(); return; }
+    const r = await fetch('/redeem', { method: 'POST', headers: { 'x-id': id }, body: JSON.stringify({ code }) });
+    if (r.ok) { toast('Pro aktif'); loadQuota(); return true; }
     const d = await r.json(); toast({ max: 'Kode sudah dipakai di 2 perangkat', expired: 'Kode kedaluwarsa' }[d.error] || 'Kode salah');
   } catch { toast('Tidak ada koneksi'); }
+  return false;
+}
+$('redeem').onclick = async () => { if (await activate($('code').value)) showPro(false); };
+
+// ===== Pembayaran Midtrans =====
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let snapReady;
+const loadSnap = (url, key) => snapReady || (snapReady = new Promise((ok, no) => {
+  const s = document.createElement('script'); s.src = url; s.dataset.clientKey = key; s.onload = ok; s.onerror = () => { snapReady = null; no(); };
+  document.head.appendChild(s);
+}));
+async function claim(order, tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const d = await (await fetch('/claim?order=' + order, { headers: { 'x-id': id } })).json();
+      if (d.code) return d.code;
+      if (d.status === 'failed' || d.status === 'none') { localStorage.removeItem('cs_order'); return null; }
+    } catch {}
+    if (i < tries - 1) await sleep(3000);
+  }
+  return null;
+}
+async function got(code) {
+  localStorage.removeItem('cs_order');
+  $('gotCode').textContent = code; $('code').value = code; $('got').classList.remove('hidden'); $('chk').classList.add('hidden');
+  await activate(code);
+}
+$('help').onclick = () => $('helpbox').classList.toggle('hidden');
+$('copy').onclick = () => { navigator.clipboard.writeText($('gotCode').textContent).then(() => toast('Kode disalin')).catch(() => {}); };
+$('chk').onclick = async () => {
+  const o = localStorage.cs_order; if (!o) return toast('Belum ada pembayaran');
+  toast('Mengecek...'); const c = await claim(o, 1);
+  c ? got(c) : toast('Belum lunas');
+};
+$('pay').onclick = async () => {
+  $('pay').disabled = true;
+  try {
+    const r = await fetch('/pay', { method: 'POST', headers: { 'x-id': id } }), d = await r.json();
+    if (!r.ok) throw d.error;
+    localStorage.cs_order = d.order;
+    await loadSnap(d.snapUrl, d.clientKey);
+    const done = async () => { const c = await claim(d.order); c ? got(c) : toast('Menunggu pembayaran. Tekan Cek pembayaran nanti'); };
+    snap.pay(d.token, { onSuccess: done, onPending: done, onError: () => toast('Pembayaran gagal'), onClose: () => {} });
+  } catch (e) { toast(e === 'off' ? 'Pembayaran belum aktif' : 'Gagal memulai pembayaran'); }
+  $('pay').disabled = false;
 };
 $('file').onchange = (e) => { file = e.target.files[0]; $('fname').textContent = file ? file.name : 'Pilih video'; };
 ['dragover', 'drop'].forEach((ev) => $('drop').addEventListener(ev, (e) => {
@@ -160,4 +203,5 @@ $('show').innerHTML = SHOWCASE.map(([t, u]) => `<div class="relative shrink-0 sn
   <div class="absolute inset-x-0 bottom-0 p-3 pt-10 bg-gradient-to-t from-black/80 text-sm font-bold">${t}</div></div>`).join('');
 
 loadQuota(); renderHist();
+if (localStorage.cs_order) claim(localStorage.cs_order, 1).then((c) => { if (c) { showPro(true); got(c); } });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
