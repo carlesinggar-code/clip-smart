@@ -1,6 +1,6 @@
 // Cloudflare Worker: kuota, kode Pro, dan proxy Gemini. Frontend dilayani dari folder public (aset gratis).
 // Dibuat hemat CPU (batas gratis 10 ms): audio tidak di-parse, hanya diteruskan.
-const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'Content-Type': 'application/json' } });
+const J = (o, s = 200, h = {}) => new Response(JSON.stringify(o), { status: s, headers: { 'Content-Type': 'application/json', ...h } });
 const wk = () => Math.floor(Date.now() / 6048e5);
 const PRICE = 14999;
 const A32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -12,10 +12,15 @@ const TTL = 2592000;
 const PRE = '{"contents":[{"parts":[{"inline_data":{"mime_type":"audio/wav","data":"';
 const suf = (n) => `"}},{"text":"Pilih ${n} momen paling menarik/viral dari audio ini, masing-masing 20-45 detik, tidak tumpang tindih. Balas JSON saja: [{\\"start\\":detik,\\"end\\":detik}]"}]}],"generationConfig":{"responseMimeType":"application/json"}}`;
 
+// Kuota: n = klip yang sudah jadi (terhitung). h = "tahanan" selama klip diproses; hanya dihitung setelah klip benar-benar jadi (/commit).
+const HOLD_MS = 20 * 60 * 1000;
+const urec = async (env, id) => { const v = await env.KV.get(`u:${id}:${wk()}`, 'json'); return v && typeof v === 'object' ? v : { n: +v || 0 }; };
+const live = (r) => !!r.h && Date.now() - r.ht < HOLD_MS;
+const uput = (env, id, r) => env.KV.put(`u:${id}:${wk()}`, JSON.stringify(r), { expirationTtl: 864000 });
 async function status(env, id) {
-  const [p, u] = await Promise.all([env.KV.get(`p:${id}`, 'json'), env.KV.get(`u:${id}:${wk()}`)]);
+  const [p, r] = await Promise.all([env.KV.get(`p:${id}`, 'json'), urec(env, id)]);
   const pro = !!p && p.exp > Date.now();
-  return { pro, max: pro ? 5 : 2, used: +u || 0 };
+  return { pro, max: pro ? 5 : 2, used: (r.n || 0) + (live(r) ? 1 : 0), until: pro ? p.exp : 0 };
 }
 
 export default {
@@ -54,6 +59,7 @@ export default {
     // ---- Midtrans: buat transaksi ----
     if (path === '/pay' && req.method === 'POST') {
       if (!env.MIDTRANS_SERVER_KEY || !env.MIDTRANS_CLIENT_KEY) return J({ error: 'off' }, 503);
+      if ((await status(env, id)).pro) return J({ error: 'active' }, 409);   // Pro masih aktif, tidak perlu bayar lagi
       const order = `CS${Date.now().toString(36)}${rand(8)}`;
       const payload = {
         transaction_details: { order_id: order, gross_amount: PRICE },
@@ -95,13 +101,42 @@ export default {
       return J(o.code ? { status: 'paid', code: o.code } : { status: o.status });
     }
 
+    // ---- Ambil video dari link langsung (khusus Pro, maks 500 MB, hanya diteruskan tanpa diolah) ----
+    if (path === '/fetch') {
+      if (!(await status(env, id)).pro) return J({ error: 'pro' }, 403);
+      let u; try { u = new URL(url.searchParams.get('url') || ''); } catch { return J({ error: 'url' }, 400); }
+      if (!/^https?:$/.test(u.protocol) || u.hostname === 'localhost' || /^[\d.]+$/.test(u.hostname) || u.hostname.includes(':')) return J({ error: 'url' }, 400);
+      const r = await fetch(u.toString(), { headers: { 'User-Agent': 'Mozilla/5.0 ClipSmart' } }).catch(() => null);
+      if (!r || !r.ok) return J({ error: 'upstream' }, 502);
+      const ct = (r.headers.get('content-type') || '').toLowerCase(), len = +r.headers.get('content-length') || 0;
+      if (!(ct.startsWith('video/') || ct.includes('octet-stream') || ct.includes('mp4'))) return J({ error: 'notvideo' }, 415);
+      if (!len) return J({ error: 'nosize' }, 411);
+      if (len > 500e6) return J({ error: 'big' }, 413);
+      return new Response(r.body, { headers: { 'Content-Type': ct, 'Content-Length': String(len) } });
+    }
+
+    // ---- Klip jadi -> jatah terpakai | klip gagal -> jatah dikembalikan ----
+    if ((path === '/commit' || path === '/refund') && req.method === 'POST') {
+      const ur = await urec(env, id), t = req.headers.get('x-hold');
+      if (!t || ur.h !== t) return J({ ok: true });
+      if (path === '/commit') ur.n = (ur.n || 0) + 1;
+      else { if ((ur.rf || 0) >= 3) return J({ ok: true }); ur.rf = (ur.rf || 0) + 1; }   // batas pengembalian: 3x/minggu
+      ur.h = null;
+      await uput(env, id, ur);
+      return J({ ok: true });
+    }
+
     if (path === '/analyze' && req.method === 'POST') {
-      const s = await status(env, id);
-      if (s.used >= s.max) return J({ error: 'quota' }, 429);
+      const [ur, pr] = await Promise.all([urec(env, id), env.KV.get(`p:${id}`, 'json')]);
+      const max = pr && pr.exp > Date.now() ? 5 : 2;
+      if (live(ur)) return J({ error: 'busy' }, 409);
+      if ((ur.n || 0) >= max) return J({ error: 'quota' }, 429);
       const audio = await req.arrayBuffer();
       if (audio.byteLength > 26e6) return J({ error: 'big' }, 413);
+      const hold = rand(12); ur.h = hold; ur.ht = Date.now();
       // Batas tulis harian KV habis -> browser pakai cadangan tanpa AI
-      try { await env.KV.put(`u:${id}:${wk()}`, String(s.used + 1), { expirationTtl: 864000 }); } catch { return J({ error: 'ai' }, 503); }
+      try { await uput(env, id, ur); } catch { return J({ error: 'ai' }, 503); }
+      const hh = { 'x-hold': hold };
 
       const body = new Blob([PRE, audio, suf(Math.min(+req.headers.get('x-count') || 1, 2))]);
       const keys = (env.GEMINI_KEYS || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -111,10 +146,10 @@ export default {
         try {
           const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,
             { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': keys[(st + i) % keys.length] }, body });
-          if (r.ok) return new Response(r.body, { headers: { 'Content-Type': 'application/json' } });
+          if (r.ok) return new Response(r.body, { headers: { 'Content-Type': 'application/json', ...hh } });
         } catch {}
       }
-      return J({ error: 'ai' }, 503);
+      return J({ error: 'ai' }, 503, hh);
     }
     return env.ASSETS.fetch(req);
   }
