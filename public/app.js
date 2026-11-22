@@ -91,10 +91,10 @@ $('pay').onclick = async () => {
   } catch (e) { toast(e === 'off' ? 'Pembayaran belum aktif' : e === 'active' ? 'Pro masih aktif' : 'Gagal memulai pembayaran'); if (e === 'active') loadQuota(); }
   $('pay').disabled = !!q.pro;
 };
-$('file').onchange = (e) => { file = e.target.files[0]; $('fname').textContent = file ? file.name : 'Berikan video'; };
+$('file').onchange = (e) => setFile(e.target.files[0] || null);
 ['dragover', 'drop'].forEach((ev) => $('drop').addEventListener(ev, (e) => {
   e.preventDefault();
-  if (ev === 'drop' && e.dataTransfer.files[0]) { file = e.dataTransfer.files[0]; $('fname').textContent = file.name; }
+  if (ev === 'drop' && e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
 }));
 
 // Audio 8 kHz mono -> WAV base64 (kecil, cukup untuk analisis suara)
@@ -137,7 +137,7 @@ async function analyze(b64, n) {
 function localPick(pcm, n) {
   const R = 8000, secs = Math.floor(pcm.length / R), e = [];
   for (let s = 0; s < secs; s++) { let t = 0; for (let i = s * R; i < (s + 1) * R; i += 4) t += pcm[i] * pcm[i]; e.push(t); }
-  const L = Math.min(30, secs), sc = [], out = [];
+  const L = Math.min(45, secs), sc = [], out = [];
   let w = e.slice(0, L).reduce((x, y) => x + y, 0);
   for (let s = 0; s + L <= secs; s++) { if (s) w += e[s + L - 1] - e[s - 1]; sc.push([w, s]); }
   sc.sort((x, y) => y[0] - x[0]);
@@ -162,8 +162,8 @@ $('urlGo').onclick = async () => {
       prog('Mengunduh link', total ? Math.round((got / total) * 100) : 50);
     }
     const name = decodeURIComponent(new URL(u).pathname.split('/').pop() || 'video.mp4').slice(-60);
-    file = new File(parts, name, { type: r.headers.get('content-type') || 'video/mp4' });
-    $('fname').textContent = file.name; $('prog').classList.add('hidden'); toast('Video siap');
+    setFile(new File(parts, name, { type: r.headers.get('content-type') || 'video/mp4' }));
+    $('prog').classList.add('hidden'); toast('Video siap');
   } catch (e) {
     $('prog').classList.add('hidden');
     toast({ pro: 'Khusus Pro', notvideo: 'Link harus langsung ke file video (.mp4), bukan halaman YouTube/TikTok', nosize: 'Server link tidak memberi ukuran file', big: 'Maksimal 500 MB', url: 'Link tidak valid', upstream: 'Link tidak bisa dibuka' }[e] || 'Gagal mengambil video');
@@ -326,52 +326,101 @@ async function cut(src, au, start, end, hd, o, onp) {
 }
 
 // Rapikan hasil AI: dalam durasi video, 3-60 detik
-const fixClips = (arr, dur, n) => (arr || []).map((c) => {
-  const s = Math.max(0, Math.min(+c.start || 0, dur - 5));
-  return { start: s, end: Math.min(+c.end || 0, dur, s + 60) };
-}).filter((c) => c.end - c.start >= 3).slice(0, n);
+const fixClips = (arr, dur, n) => {
+  const cap = dur > 300 ? 80 : 60;   // klip 30-60 detik (maks 80 detik untuk video panjang)
+  const list = (arr || []).map((c) => {
+    let s = Math.max(0, Math.min(+c.start || 0, dur - 5)), e = Math.min(+c.end || 0, dur, s + cap);
+    if (e - s < 30) { e = Math.min(dur, s + 30); s = Math.max(0, e - 30); }
+    return { start: s, end: e };
+  }).filter((c) => c.end - c.start >= 3);
+  const out = [];
+  for (const c of list) if (out.every((o) => c.start >= o.end || c.end <= o.start)) out.push(c);   // tidak tumpang tindih
+  return out.slice(0, n);
+};
 
-// ===== Cari highlight -> tampilkan -> unduh (HD / Super HD) =====
-let H = null, working = false;   // H = { src, clips, audios, committed }
+// ===== Cari highlight -> klip jadi otomatis -> unduh =====
+let H = null, working = false;   // H = { src, clips, audios, out: [{hd, shd}], committed, ori }
 const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
-function showHighlights() {
-  const L = ori === 'l';
-  $('out').innerHTML = H.clips.map((c, i) => `
-    <div class="rounded-2xl overflow-hidden bg-neutral-900 ${L ? 'col-span-2' : ''}" data-i="${i}">
-      <video src="${H.src}#t=${c.start},${c.end}" controls playsinline preload="metadata" class="w-full ${L ? 'aspect-video' : 'aspect-[9/16]'} object-cover"></video>
-      <div class="px-4 pt-3 text-sm font-bold">Highlight ${i + 1} <span class="font-medium text-neutral-500">· ${mmss(c.start)}–${mmss(c.end)}</span></div>
-      <p class="st px-4 pt-1 text-xs text-neutral-500 min-h-[1rem]"></p>
-      <div class="grid grid-cols-2 gap-2 p-3">
-        <button data-hd="0" class="dl py-2.5 rounded-full bg-neutral-800 text-sm font-bold">Unduh HD</button>
-        <button data-hd="1" class="dl shd py-2.5 rounded-full gpro text-neutral-900 text-sm font-extrabold">${q.pro ? 'Unduh Super HD' : '🔒 Super HD'}</button>
-      </div>
-    </div>`).join('');
-  $('out').querySelectorAll('.dl').forEach((b) => (b.onclick = () => exportClip(+b.closest('[data-i]').dataset.i, b.dataset.hd === '1', b.closest('[data-i]'))));
+// Pilih video: tampilkan gambar kecil + durasi + ukuran agar jelas sudah masuk
+async function setFile(f) {
+  file = f; $('fname').textContent = f ? f.name : 'Berikan video';
+  $('thumb').classList.add('hidden'); $('finfo').textContent = 'Maks 500 MB · 12 menit';
+  if (!f) return;
+  const mb = Math.round(f.size / 1e6) + ' MB', u = URL.createObjectURL(f), v = document.createElement('video');
+  let done = false;
+  const fin = (dur, img, bad) => {
+    if (done) return; done = true; URL.revokeObjectURL(u);
+    if (file !== f) return;
+    $('finfo').textContent = bad ? 'Format ini mungkin tidak didukung browser' : `✓ Video siap${dur > 0 ? ' · ' + mmss(dur) : ''} · ${mb}`;
+    if (img) { $('thumb').src = img; $('thumb').classList.remove('hidden'); }
+  };
+  v.muted = true; v.playsInline = true; v.preload = 'auto';
+  v.onloadedmetadata = () => { v.currentTime = Math.min(1, (v.duration || 2) / 2); };
+  v.onseeked = () => {
+    try {
+      const c = document.createElement('canvas'), r = 480 / Math.max(v.videoWidth, v.videoHeight);
+      c.width = Math.round(v.videoWidth * r); c.height = Math.round(v.videoHeight * r);
+      c.getContext('2d').drawImage(v, 0, 0, c.width, c.height); fin(v.duration, c.toDataURL('image/jpeg', 0.7));
+    } catch { fin(v.duration); }
+  };
+  v.onerror = () => fin(NaN, null, true);
+  setTimeout(() => fin(v.duration), 6000);
+  v.src = u;
 }
 
-async function exportClip(i, hd, card) {
+// Buat satu klip. Jatah baru terpotong saat klip PERTAMA selesai dan masuk riwayat.
+async function makeClip(i, hd, onp) {
+  const c = H.clips[i];
+  const { blob, ext } = await cut(H.src, H.audios[i], c.start, c.end, hd, H.ori, onp);
+  if (!H.committed) { H.committed = true; await release('commit'); q.used++; loadQuota(); }
+  H.out[i][hd ? 'shd' : 'hd'] = { url: URL.createObjectURL(blob), name: `clip-${i + 1}-${hd ? 'superhd' : 'hd'}.${ext}` };
+  await tx('readwrite', (s) => s.put({ id: Date.now() + i, blob, ext, ori: H.ori, hd, date: Date.now() }));
+  await renderHist();
+}
+
+const btnsHtml = (i) => {
+  const o = H.out[i];
+  const hd = o.hd
+    ? `<a href="${o.hd.url}" download="${o.hd.name}" class="py-2.5 text-center rounded-full bg-sky-300 text-neutral-900 text-sm font-extrabold">Unduh HD</a>`
+    : `<button data-k="hd" class="dl py-2.5 rounded-full bg-neutral-800 text-sm font-bold">Unduh HD</button>`;
+  const shd = o.shd
+    ? `<a href="${o.shd.url}" download="${o.shd.name}" class="gpro py-2.5 text-center rounded-full text-neutral-900 text-sm font-extrabold">Unduh Super HD</a>`
+    : `<button data-k="shd" class="dl shd gpro py-2.5 rounded-full text-neutral-900 text-sm font-extrabold">${q.pro ? 'Unduh Super HD' : '🔒 Super HD'}</button>`;
+  return hd + shd;
+};
+
+const cardHtml = (i) => {
+  const c = H.clips[i], o = H.out[i], L = H.ori === 'l', url = (o.shd || o.hd).url;
+  return `<div class="rounded-2xl overflow-hidden bg-neutral-900 mx-auto w-full ${L ? '' : 'max-w-sm'}" data-i="${i}">
+    <video src="${url}" controls playsinline preload="metadata" class="w-full ${L ? 'aspect-video' : 'aspect-[9/16]'} object-cover bg-black"></video>
+    <div class="px-4 pt-3 text-sm font-bold">Highlight ${i + 1} <span class="font-medium text-neutral-500">· ${Math.round(c.end - c.start)} detik</span></div>
+    <p class="px-4 text-xs text-neutral-500">Dari menit ${mmss(c.start)} – ${mmss(c.end)}</p>
+    <p class="st px-4 pt-1 text-xs text-neutral-400 min-h-[1rem]"></p>
+    <div class="btns grid grid-cols-2 gap-2 p-3">${btnsHtml(i)}</div>
+  </div>`;
+};
+
+const bindCard = (card) => card.querySelectorAll('.dl').forEach((b) => (b.onclick = () => onDemand(+card.dataset.i, b.dataset.k === 'shd', card)));
+
+// Versi lain (mis. HD untuk Pro, atau Super HD setelah upgrade) dibuat saat diminta
+async function onDemand(i, hd, card) {
   if (hd && !q.pro) return showPro(true);
   if (working) return toast('Tunggu proses yang berjalan selesai');
-  const c = H.clips[i], st = card.querySelector('.st'), btns = card.querySelectorAll('.dl');
-  working = true; btns.forEach((b) => (b.disabled = true));
+  const st = card.querySelector('.st'), box = card.querySelector('.btns'), key = hd ? 'shd' : 'hd', lab = `${hd ? 'Super HD' : 'HD'} · tetap di halaman ini`;
+  working = true; box.querySelectorAll('.dl').forEach((b) => (b.disabled = true));
   let wl; try { wl = await navigator.wakeLock?.request('screen'); } catch {}
-  const lab = `${hd ? 'Super HD' : 'HD'} · tetap di halaman ini`;
   try {
     st.textContent = lab;
-    const { blob, ext } = await cut(H.src, H.audios[i], c.start, c.end, hd, ori, (f) => { st.textContent = `${lab} · ${Math.round(f * 100)}%`; });
-    if (!H.committed) { H.committed = true; await release('commit'); q.used++; loadQuota(); }   // jatah baru terpotong setelah klip jadi
-    const url = URL.createObjectURL(blob), name = `clip-${i + 1}-${hd ? 'superhd' : 'hd'}.${ext}`;
-    await tx('readwrite', (s) => s.put({ id: Date.now(), blob, ext, ori, hd, date: Date.now() }));
-    renderHist();
-    st.innerHTML = `Selesai · <a href="${url}" download="${name}" class="underline text-sky-300">Unduh lagi</a>`;
-    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    await makeClip(i, hd, (f) => { st.textContent = `${lab} · ${Math.round(f * 100)}%`; });
+    st.textContent = 'Selesai'; box.innerHTML = btnsHtml(i); bindCard(card);
+    const a = document.createElement('a'); a.href = H.out[i][key].url; a.download = H.out[i][key].name; document.body.appendChild(a); a.click(); a.remove();
   } catch (e) {
-    st.textContent = '';
-    toast({ decode: 'Format video tidak didukung', stall: 'Proses terhenti. Jatah tidak berkurang, coba lagi' }[e] || 'Gagal. Jatah tidak berkurang, coba lagi');
+    st.textContent = ''; box.querySelectorAll('.dl').forEach((b) => (b.disabled = false));
+    toast({ decode: 'Format video tidak didukung', stall: 'Proses terhenti, coba lagi' }[e] || 'Gagal, coba lagi');
   }
   if (wl) wl.release().catch(() => {});
-  btns.forEach((b) => (b.disabled = false)); working = false;
+  working = false;
 }
 
 $('go').onclick = async () => {
@@ -379,10 +428,10 @@ $('go').onclick = async () => {
   if (!file) return toast('Berikan video dulu');
   if (file.size > 500e6) return toast('Video terlalu besar (maks 500 MB)');
   working = true; $('go').disabled = true; $('out').innerHTML = '';
-  if (H) { URL.revokeObjectURL(H.src); H = null; }
+  if (H) { URL.revokeObjectURL(H.src); H.out.forEach((o) => Object.values(o).forEach((x) => URL.revokeObjectURL(x.url))); H = null; }
   let wl; try { wl = await navigator.wakeLock?.request('screen'); } catch {}
   try {
-    if (HOLD || localStorage.cs_hold) { await release('refund'); await loadQuota(); }   // highlight sebelumnya belum diunduh: jatah dikembalikan
+    if (HOLD || localStorage.cs_hold) { await release('refund'); await loadQuota(); }   // proses sebelumnya belum selesai: jatah dikembalikan
     if (q.used >= q.max) throw 'quota';
     prog('Memeriksa video', 5);
     const d0 = await probe(file);
@@ -396,12 +445,17 @@ $('go').onclick = async () => {
     if (!clips.length) clips = fixClips(localPick(pcm, n), dur, n);
     if (!clips.length) throw 'err';
     const audios = clips.map((c) => sliceAudio(buf, c.start, c.end)); buf = null; b64 = null;
-    H = { src: URL.createObjectURL(file), clips, audios, committed: false };
+    H = { src: URL.createObjectURL(file), clips, audios, out: clips.map(() => ({})), committed: false, ori };
+    for (let i = 0; i < clips.length; i++) {   // klip dibuat langsung (Pro: Super HD, gratis: HD), lalu tampil siap unduh
+      const lab = `Menyiapkan klip ${i + 1}/${clips.length} · tetap di halaman ini`, span = 58 / clips.length;
+      prog(lab, Math.round(40 + i * span));
+      await makeClip(i, !!q.pro, (f) => prog(lab, Math.round(40 + (i + f) * span)));
+      $('out').insertAdjacentHTML('beforeend', cardHtml(i)); bindCard($('out').lastElementChild);
+    }
     prog('Selesai', 100); setTimeout(() => $('prog').classList.add('hidden'), 600);
-    showHighlights();
   } catch (e) {
-    await release('refund');   // highlight belum jadi -> jatah dikembalikan
-    toast({ quota: 'Kuota habis', long: 'Maksimal 12 menit', noaudio: 'Suara video tidak terbaca', decode: 'Format video tidak didukung', busy: 'Unduh highlight sebelumnya dulu, atau coba lagi sebentar' }[e] || 'Gagal. Jatah tidak berkurang, coba lagi');
+    await release('refund');   // belum ada klip jadi -> jatah dikembalikan (kalau sudah ada, tidak berpengaruh)
+    toast({ quota: 'Kuota habis', long: 'Maksimal 12 menit', noaudio: 'Suara video tidak terbaca', decode: 'Format video tidak didukung', busy: 'Selesaikan proses sebelumnya dulu, atau coba lagi sebentar', stall: 'Proses terhenti. Jatah tidak berkurang, coba lagi' }[e] || 'Gagal. Jatah tidak berkurang, coba lagi');
     if (e === 'quota') showPro(true);
     $('prog').classList.add('hidden'); loadQuota();
   }

@@ -10,7 +10,7 @@ const sha512 = async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-5
 const midBase = (env) => env.MIDTRANS_ENV === 'production' ? 'https://app.midtrans.com' : 'https://app.sandbox.midtrans.com';
 const TTL = 2592000;
 const PRE = '{"contents":[{"parts":[{"inline_data":{"mime_type":"audio/wav","data":"';
-const suf = (n) => `"}},{"text":"Pilih ${n} momen paling menarik/viral dari audio ini, masing-masing 20-45 detik, tidak tumpang tindih. Balas JSON saja: [{\\"start\\":detik,\\"end\\":detik}]"}]}],"generationConfig":{"responseMimeType":"application/json"}}`;
+const suf = (n) => `"}},{"text":"Dengarkan audio ini. Tentukan jenisnya: game/gameplay, podcast atau obrolan, video promosi/iklan, atau lainnya. Lalu pilih ${n} bagian terbaik untuk klip pendek. Game: momen paling seru dan menegangkan (aksi, teriakan, kemenangan, kejutan). Podcast atau obrolan: bagian paling memotivasi atau berisi pesan yang kuat. Promosi: bagian yang paling menarik dan membuat orang ingin membeli. Lainnya: momen paling menarik. Tiap klip 30 sampai 60 detik (boleh sampai 80 detik hanya jika video panjang dan momennya tidak boleh terpotong), mulai di awal kalimat dan berakhir di akhir kalimat, tidak tumpang tindih. Balas JSON saja: [{\\"start\\":detik,\\"end\\":detik}]"}]}],"generationConfig":{"responseMimeType":"application/json"}}`;
 
 // Kuota: n = klip yang sudah jadi (terhitung). h = "tahanan" selama klip diproses; hanya dihitung setelah klip benar-benar jadi (/commit).
 const HOLD_MS = 20 * 60 * 1000;
@@ -20,7 +20,7 @@ const uput = (env, id, r) => env.KV.put(`u:${id}:${wk()}`, JSON.stringify(r), { 
 async function status(env, id) {
   const [p, r] = await Promise.all([env.KV.get(`p:${id}`, 'json'), urec(env, id)]);
   const pro = !!p && p.exp > Date.now();
-  return { pro, max: pro ? 5 : 2, used: (r.n || 0) + (live(r) ? 1 : 0), until: pro ? p.exp : 0 };
+  return { pro, max: pro ? 5 : (+env.FREE_MAX || 2), used: (r.n || 0) + (live(r) ? 1 : 0), until: pro ? p.exp : 0 };
 }
 
 export default {
@@ -54,6 +54,14 @@ export default {
         await env.KV.put(`c:${code}`, JSON.stringify({ devices: [], days, exp: null })); out.push(code);
       }
       return J({ codes: out });
+    }
+
+    // ---- Reset kuota SEMUA pengguna: /admin/reset?token=XXX (ulangi sampai sisa = false) ----
+    if (path === '/admin/reset') {
+      if (!env.ADMIN_TOKEN || url.searchParams.get('token') !== env.ADMIN_TOKEN) return J({ error: 'no' }, 403);
+      const l = await env.KV.list({ prefix: 'u:', limit: 40 });   // 40 per panggilan (batas subrequest paket gratis)
+      await Promise.all(l.keys.map((k) => env.KV.delete(k.name)));
+      return J({ dihapus: l.keys.length, sisa: !l.list_complete });
     }
 
     // ---- Midtrans: buat transaksi ----
@@ -128,7 +136,7 @@ export default {
 
     if (path === '/analyze' && req.method === 'POST') {
       const [ur, pr] = await Promise.all([urec(env, id), env.KV.get(`p:${id}`, 'json')]);
-      const max = pr && pr.exp > Date.now() ? 5 : 2;
+      const max = pr && pr.exp > Date.now() ? 5 : (+env.FREE_MAX || 2);
       if (live(ur)) return J({ error: 'busy' }, 409);
       if ((ur.n || 0) >= max) return J({ error: 'quota' }, 429);
       const audio = await req.arrayBuffer();
